@@ -312,3 +312,7 @@ app.post('/api/contact', async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
+
+app.use(cors({ 
+  origin: ['http://localhost:5173', 'https://hkmu-3d-model-hub.vercel.app'] 
+}));
