@@ -30,7 +30,7 @@ const upload = multer({
 });
 
 // Middleware
-app.use(cors({ origin: 'http://localhost:5173' }));
+app.use(cors({ origin: ['http://localhost:5173', 'https://hkmu-3d-model-hub.vercel.app'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -61,8 +61,21 @@ const modelSchema = new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   filePath: { type: String, required: true },
   previewPath: { type: String, required: true },
+  fileSize: { type: Number, default: 0 },
+  visits: { type: Number, default: 0 },
+  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  downloads: { type: Number, default: 0 },
 });
 const Model = mongoose.model('Model', modelSchema);
+
+// Comment Schema
+const commentSchema = new mongoose.Schema({
+  model: { type: mongoose.Schema.Types.ObjectId, ref: 'Model', required: true },
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  content: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+const Comment = mongoose.model('Comment', commentSchema);
 
 // Middleware to verify JWT
 const authenticateToken = (req, res, next) => {
@@ -78,12 +91,31 @@ const authenticateToken = (req, res, next) => {
 // Register Route
 app.post('/api/register', async (req, res) => {
   const { username, email, password, nickname } = req.body;
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'Username, email, and password are required' });
+  }
+  if (!email.endsWith('@hkmu.edu.hk') && !email.endsWith('@live.hkmu.edu.hk')) {
+    return res.status(400).json({ error: 'Only HKMU email addresses (@hkmu.edu.hk or @live.hkmu.edu.hk) are allowed' });
+  }
   try {
+    // Check for existing username or email
+    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
+    if (existingUser) {
+      return res.status(400).json({
+        error: existingUser.username === username ? 'Username already taken' : 'Email already registered'
+      });
+    }
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ username, email, password: hashedPassword, nickname: nickname || '' });
+    const user = new User({
+      username,
+      email,
+      password: hashedPassword,
+      nickname: nickname || '',
+    });
     await user.save();
-    res.status(201).json({ message: 'User registered successfully' });
+    res.status(201).json({ message: 'User registered successfully. You can now log in.' });
   } catch (error) {
+    console.error('Registration error:', error.message);
     res.status(400).json({ error: 'User registration failed', details: error.message });
   }
 });
@@ -104,6 +136,7 @@ app.post('/api/login', async (req, res) => {
       user: { id: user._id, username: user.username, email: user.email, nickname: user.nickname || '', icon: user.icon || '', role: user.role },
     });
   } catch (error) {
+    console.error('Login error:', error.message);
     res.status(500).json({ error: 'Login failed', details: error.message });
   }
 });
@@ -133,6 +166,7 @@ app.post('/api/profile', authenticateToken, upload.single('icon'), async (req, r
       user: { id: user._id, username: user.username, email: user.email, nickname: user.nickname || '', icon: user.icon || '', role: user.role },
     });
   } catch (error) {
+    console.error('Profile update error:', error.message);
     res.status(500).json({ error: 'Profile update failed', details: error.message });
   }
 });
@@ -145,6 +179,9 @@ app.post('/api/models', authenticateToken, upload.array('file', 3), async (req, 
   if (!name || !fileType) return res.status(400).json({ error: 'Name and fileType are required' });
 
   try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
     const modelFile = files.find(f => f.originalname.match(/\.(obj|fbx|glb)$/i));
     const previewFile = files.find(f => f.originalname.match(/\.(png|jpg|jpeg)$/i));
     if (!modelFile) return res.status(400).json({ error: 'Model file (.obj, .fbx, .glb) required' });
@@ -176,11 +213,14 @@ app.post('/api/models', authenticateToken, upload.array('file', 3), async (req, 
       owner: req.user.id,
       filePath: modelFileName,
       previewPath: previewFileName,
+      fileSize: modelFile.size,
+      likes: [],
     });
     await model.save();
 
     res.json({ message: 'Model uploaded successfully', model });
   } catch (error) {
+    console.error('Upload error:', error.message);
     res.status(500).json({ error: 'Upload failed', details: error.message });
   }
 });
@@ -191,16 +231,34 @@ app.get('/api/models', async (req, res) => {
     const models = await Model.find().populate('owner', 'username nickname');
     res.json(models);
   } catch (error) {
+    console.error('Fetch models error:', error.message);
     res.status(500).json({ error: 'Failed to fetch models', details: error.message });
+  }
+});
+
+// Get Single Model by ID
+app.get('/api/models/:id', async (req, res) => {
+  try {
+    const model = await Model.findById(req.params.id).populate('owner', 'username nickname');
+    if (!model) return res.status(404).json({ error: 'Model not found' });
+    model.visits = (model.visits || 0) + 1;
+    await model.save();
+    res.json(model);
+  } catch (error) {
+    console.error('Fetch model error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch model', details: error.message });
   }
 });
 
 // Get User's Models
 app.get('/api/user/models', authenticateToken, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
     const models = await Model.find({ owner: req.user.id });
     res.json(models);
   } catch (error) {
+    console.error('Fetch user models error:', error.message);
     res.status(500).json({ error: 'Failed to fetch user models', details: error.message });
   }
 });
@@ -211,6 +269,8 @@ app.put('/api/models/:id', authenticateToken, upload.array('file', 3), async (re
   const { name, description, fileType } = req.body;
   const files = req.files;
   try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
     const model = await Model.findById(id);
     if (!model) return res.status(404).json({ error: 'Model not found' });
     if (model.owner.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
@@ -232,6 +292,7 @@ app.put('/api/models/:id', authenticateToken, upload.array('file', 3), async (re
         });
         if (error) throw error;
         model.filePath = modelFileName;
+        model.fileSize = modelFile.size;
       }
 
       if (previewFile) {
@@ -257,6 +318,7 @@ app.put('/api/models/:id', authenticateToken, upload.array('file', 3), async (re
     await model.save();
     res.json({ message: 'Model updated successfully', model });
   } catch (error) {
+    console.error('Update model error:', error.message);
     res.status(500).json({ error: 'Update failed', details: error.message });
   }
 });
@@ -265,6 +327,8 @@ app.put('/api/models/:id', authenticateToken, upload.array('file', 3), async (re
 app.delete('/api/models/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
     const model = await Model.findById(id);
     if (!model) return res.status(404).json({ error: 'Model not found' });
     if (model.owner.toString() !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
@@ -278,27 +342,96 @@ app.delete('/api/models/:id', authenticateToken, async (req, res) => {
     }
     await Promise.all(deletePromises);
 
+    await Comment.deleteMany({ model: id });
     await model.deleteOne();
     res.json({ message: 'Model deleted successfully' });
   } catch (error) {
+    console.error('Delete model error:', error.message);
     res.status(500).json({ error: 'Deletion failed', details: error.message });
   }
 });
 
 // Download Model
-app.get('/api/models/:fileName', authenticateToken, async (req, res) => {
+app.get('/api/models/download/:fileName', authenticateToken, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
     const { fileName } = req.params;
+    const model = await Model.findOne({ filePath: { $regex: `${fileName}$`, $options: 'i' } });
+    if (!model) {
+      console.error(`Model not found for fileName: ${fileName}`);
+      return res.status(404).json({ error: 'Model not found' });
+    }
     const { data, error } = await supabase.storage
       .from('models')
-      .download(`models/${req.user.id}/${fileName}`);
-    if (error) throw error;
+      .download(model.filePath);
+    if (error) {
+      console.error(`Supabase download error: ${error.message}`);
+      throw error;
+    }
+    model.downloads = (model.downloads || 0) + 1;
+    await model.save();
     const arrayBuffer = await data.arrayBuffer();
     res.setHeader('Content-Type', fileName.endsWith('.glb') ? 'model/gltf-binary' : fileName.endsWith('.png') ? 'image/png' : fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') ? 'image/jpeg' : fileName.endsWith('.fbx') ? 'model/vnd.fbx' : 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.send(Buffer.from(arrayBuffer));
   } catch (error) {
+    console.error('Download endpoint error:', error.message);
     res.status(500).json({ error: 'Download failed', details: error.message });
+  }
+});
+
+// Like Model
+app.post('/api/models/:id/like', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const model = await Model.findById(req.params.id);
+    if (!model) return res.status(404).json({ error: 'Model not found' });
+    if (!Array.isArray(model.likes)) model.likes = [];
+    if (model.likes.includes(req.user.id)) {
+      model.likes = model.likes.filter(userId => userId.toString() !== req.user.id);
+    } else {
+      model.likes.push(req.user.id);
+    }
+    await model.save();
+    res.json({ message: 'Like updated', likes: model.likes });
+  } catch (error) {
+    console.error('Like endpoint error:', error.message);
+    res.status(500).json({ error: 'Like failed', details: error.message });
+  }
+});
+
+// Post Comment
+app.post('/api/models/:id/comments', authenticateToken, async (req, res) => {
+  const { content } = req.body;
+  if (!content) return res.status(400).json({ error: 'Comment content is required' });
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const model = await Model.findById(req.params.id);
+    if (!model) return res.status(400).json({ error: 'Model not found' });
+    const comment = new Comment({
+      model: req.params.id,
+      user: req.user.id,
+      content,
+    });
+    await comment.save();
+    res.status(201).json({ message: 'Comment posted', comment });
+  } catch (error) {
+    console.error('Comment endpoint error:', error.message);
+    res.status(500).json({ error: 'Comment failed', details: error.message });
+  }
+});
+
+// Get Comments
+app.get('/api/models/:id/comments', async (req, res) => {
+  try {
+    const comments = await Comment.find({ model: req.params.id }).populate('user', 'username nickname');
+    res.json(comments);
+  } catch (error) {
+    console.error('Fetch comments error:', error.message);
+    res.status(500).json({ error: 'Fetch comments failed', details: error.message });
   }
 });
 
@@ -312,7 +445,3 @@ app.post('/api/contact', async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
-
-app.use(cors({ 
-  origin: ['http://localhost:5173', 'https://hkmu-3d-model-hub.vercel.app'] 
-}));
