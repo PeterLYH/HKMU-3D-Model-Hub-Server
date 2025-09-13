@@ -98,7 +98,6 @@ app.post('/api/register', async (req, res) => {
     return res.status(400).json({ error: 'Only HKMU email addresses (@hkmu.edu.hk or @live.hkmu.edu.hk) are allowed' });
   }
   try {
-    // Check for existing username or email
     const existingUser = await User.findOne({ $or: [{ username }, { email }] });
     if (existingUser) {
       return res.status(400).json({
@@ -431,7 +430,7 @@ app.get('/api/models/:id/comments', async (req, res) => {
     res.json(comments);
   } catch (error) {
     console.error('Fetch comments error:', error.message);
-    res.status(500).json({ error: 'Fetch comments failed', details: error.message });
+    res.status(500).json({ error: 'Failed to fetch comments', details: error.message });
   }
 });
 
