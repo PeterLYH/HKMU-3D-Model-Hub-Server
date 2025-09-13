@@ -129,7 +129,7 @@ app.post('/api/login', async (req, res) => {
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ id: user._id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
     res.json({
       token,
       user: { id: user._id, username: user.username, email: user.email, nickname: user.nickname || '', icon: user.icon || '', role: user.role },
@@ -440,6 +440,157 @@ app.post('/api/contact', async (req, res) => {
   console.log('Received contact form submission:', { name, email, message });
   res.status(200).json({ message: 'Form submission received!' });
 });
+
+// Admin Routes - Protected for admins only
+const authenticateAdmin = (req, res, next) => {
+  authenticateToken(req, res, () => {
+    User.findById(req.user.id).then(user => {
+      if (user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+      req.user = user;
+      next();
+    }).catch(err => res.status(500).json({ error: 'Server error' }));
+  });
+};
+
+// Get All Users (Admin Only)
+app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
+  try {
+    const users = await User.find({}, 'username email nickname icon role').populate('icon'); // Exclude password
+    res.json(users);
+  } catch (error) {
+    console.error('Fetch users error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Update User (Admin Only)
+app.put('/api/admin/users/:id', authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { username, nickname, icon, role } = req.body;
+  try {
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (username) user.username = username;
+    if (nickname !== undefined) user.nickname = nickname;
+    if (icon) user.icon = icon;
+    if (role) user.role = role;
+    await user.save();
+    res.json({ message: 'User updated successfully', user });
+  } catch (error) {
+    console.error('Update user error:', error.message);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// Delete User (Admin Only)
+app.delete('/api/admin/users/:id', authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    await user.deleteOne();
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Delete user error:', error.message);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// Get All Models (Admin Only)
+app.get('/api/admin/models', authenticateAdmin, async (req, res) => {
+  try {
+    const models = await Model.find().populate('owner', 'username nickname');
+    res.json(models);
+  } catch (error) {
+    console.error('Fetch models error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch models' });
+  }
+});
+
+// Update Model (Admin Only)
+app.put('/api/admin/models/:id', authenticateAdmin, upload.array('file', 3), async (req, res) => {
+  const { id } = req.params;
+  const { name, description, fileType } = req.body;
+  const files = req.files;
+  try {
+    const model = await Model.findById(id);
+    if (!model) return res.status(404).json({ error: 'Model not found' });
+
+    if (name) model.name = name;
+    if (description) model.description = description;
+    if (fileType) model.fileType = fileType.toLowerCase();
+
+    if (files && files.length > 0) {
+      const modelFile = files.find(f => f.originalname.match(/\.(obj|fbx|glb)$/i));
+      const previewFile = files.find(f => f.originalname.match(/\.(png|jpg|jpeg)$/i));
+      const mtlFile = files.find(f => f.originalname.match(/\.mtl$/i));
+
+      if (modelFile) {
+        const modelFileName = `models/${model.owner}/${name || model.name}.${model.fileType}`;
+        const { error: uploadError } = await supabase.storage.from('models').upload(modelFileName, modelFile.buffer, {
+          contentType: modelFile.mimetype,
+          upsert: true,
+        });
+        if (uploadError) throw uploadError;
+        model.filePath = modelFileName;
+        model.fileSize = modelFile.size;
+      }
+
+      if (previewFile) {
+        const previewFileName = `models/${model.owner}/${name || model.name}.png`;
+        const { error: uploadError } = await supabase.storage.from('models').upload(previewFileName, previewFile.buffer, {
+          contentType: 'image/png',
+          upsert: true,
+        });
+        if (uploadError) throw uploadError;
+        model.previewPath = previewFileName;
+      }
+
+      if (mtlFile) {
+        const mtlFileName = `models/${model.owner}/${name || model.name}.mtl`;
+        const { error: uploadError } = await supabase.storage.from('models').upload(mtlFileName, mtlFile.buffer, {
+          contentType: 'text/plain',
+          upsert: true,
+        });
+        if (uploadError) throw uploadError;
+      }
+    }
+
+    await model.save();
+    res.json({ message: 'Model updated successfully', model });
+  } catch (error) {
+    console.error('Update model error:', error.message);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// Delete Model (Admin Only)
+app.delete('/api/admin/models/:id', authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const model = await Model.findById(id);
+    if (!model) return res.status(404).json({ error: 'Model not found' });
+
+    const deletePromises = [
+      supabase.storage.from('models').remove([model.filePath]),
+      supabase.storage.from('models').remove([model.previewPath]),
+    ];
+    if (model.fileType === 'obj') {
+      deletePromises.push(supabase.storage.from('models').remove([model.filePath.replace('.obj', '.mtl')]));
+    }
+    await Promise.all(deletePromises);
+
+    await Comment.deleteMany({ model: id });
+    await model.deleteOne();
+    res.json({ message: 'Model deleted successfully' });
+  } catch (error) {
+    console.error('Delete model error:', error.message);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
 
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
